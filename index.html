@@ -148,8 +148,7 @@
 </div>
 
 <script>
-// 台灣股票資料 API 整合
-// 使用台灣股票中心提供的公開資料
+// 台灣股票資料 API 整合 - 支援所有上市上櫃股票
 
 async function getStockData(symbol) {
     symbol = symbol.toUpperCase().trim();
@@ -158,7 +157,7 @@ async function getStockData(symbol) {
         // 第一步：將股票名稱轉換為代碼
         let stockCode = symbol;
         
-        // 如果輸入是名稱，先嘗試查詢代碼
+        // 如果輸��是名稱，先嘗試查詢代碼
         if (isNaN(symbol)) {
             stockCode = await searchStockByName(symbol);
             if (!stockCode) {
@@ -200,23 +199,29 @@ async function getStockData(symbol) {
     }
 }
 
-// 查詢股票名稱對應的代碼
+// 查詢股票名稱對應的代碼 - 使用 Finmind 開放資料
 async function searchStockByName(name) {
     try {
-        // 使用台灣證券交易所的股票代碼查詢
-        const response = await fetch(`https://cors-anywhere.herokuapp.com/https://query.twse.com.tw/codeQuery`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-            body: `query=${encodeURIComponent(name)}&_=1`
-        }).catch(() => null);
-
-        if (!response || !response.ok) return null;
+        // 使用 Finmind 台灣股票基本資訊查詢
+        const finmindUrl = `https://api.finmindtrade.com/api/v3/data?dataset=TaiwanStockInfo&limit=1000`;
+        const finmindRes = await Promise.race([
+            fetch(finmindUrl),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+        ]).catch(() => null);
         
-        const text = await response.text();
-        // 從回應中提取股票代碼
-        const match = text.match(/(\d{4})/);
-        return match ? match[1] : null;
+        if (finmindRes && finmindRes.ok) {
+            const data = await finmindRes.json();
+            if (data.data) {
+                const match = data.data.find(stock => 
+                    stock.stock_name.includes(name) || stock.stock_id === name
+                );
+                if (match) return match.stock_id;
+            }
+        }
+
+        return null;
     } catch (e) {
+        console.error('Stock name search error:', e);
         return null;
     }
 }
@@ -224,18 +229,31 @@ async function searchStockByName(name) {
 // 取得股票基本資訊
 async function fetchStockBasicInfo(stockCode) {
     try {
-        // 使用 Finmind 或類似 API 的替代方案
-        // 這裡使用一個通用的方案，實際部署時建議整合真實 API
-        const response = await fetch(`https://api.example.com/stock/${stockCode}`)
-            .catch(() => null);
+        // 使用 Finmind 台灣股票基本資訊
+        const response = await Promise.race([
+            fetch(`https://api.finmindtrade.com/api/v3/data?dataset=TaiwanStockInfo&data_id=${stockCode}`),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+        ]);
 
-        // 如果 API 不可用，返回基本結構
+        if (response && response.ok) {
+            const data = await response.json();
+            if (data.data && data.data.length > 0) {
+                const stock = data.data[0];
+                return {
+                    name: stock.stock_name || `股票 ${stockCode}`,
+                    industry: stock.industry || '未分類',
+                    position: `代碼: ${stock.stock_id}, 市場: ${stock.market_type || '未知'}`
+                };
+            }
+        }
+        
         return {
             name: `股票 ${stockCode}`,
             industry: '未分類',
             position: '產業資訊查詢中...'
         };
     } catch (e) {
+        console.error('Basic info fetch error:', e);
         return {
             name: `股票 ${stockCode}`,
             industry: '未分類',
@@ -247,27 +265,43 @@ async function fetchStockBasicInfo(stockCode) {
 // 取得股票價格資訊
 async function fetchStockPrice(stockCode) {
     try {
-        // 使用公開的台灣股票價格 API
-        // 推薦使用 Finmind、Twstock 或其他台股 API
-        const response = await fetch(`https://query.twse.com.tw/codeQuery?query=${stockCode}&_=${Date.now()}`)
-            .then(res => res.text())
-            .catch(() => null);
-
-        // 實際應用中應解析真實回應
-        // 這裡返回基本結構方便擴展
+        // 使用 Finmind 台灣股票日行情資料
+        const today = new Date();
+        const sixDaysAgo = new Date(today.getTime() - 6 * 24 * 60 * 60 * 1000);
         
-        // 模擬資料 - 實際部署時應使用真實 API
-        const mockData = {
-            price: Math.random() * 1000 + 10,
-            change: (Math.random() * 50 - 25).toFixed(2),
-            changePercent: (Math.random() * 5 - 2.5).toFixed(2),
-            eps: (Math.random() * 100 + 1).toFixed(2),
-            pe: (Math.random() * 50 + 5).toFixed(1),
-            history: generatePriceHistory()
-        };
+        const startDate = sixDaysAgo.toISOString().split('T')[0];
+        const endDate = today.toISOString().split('T')[0];
 
-        return mockData;
+        const response = await Promise.race([
+            fetch(`https://api.finmindtrade.com/api/v3/data?dataset=TaiwanStockPrice&data_id=${stockCode}&start_date=${startDate}&end_date=${endDate}`),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+        ]);
+
+        if (response && response.ok) {
+            const data = await response.json();
+            if (data.data && data.data.length > 0) {
+                const latest = data.data[data.data.length - 1];
+                const previous = data.data.length > 1 ? data.data[data.data.length - 2] : latest;
+                
+                const change = (latest.close - previous.close).toFixed(2);
+                const changePercent = ((change / previous.close) * 100).toFixed(2);
+                
+                const history = data.data.slice(-6).map(d => parseFloat(d.close));
+
+                return {
+                    price: parseFloat(latest.close),
+                    change: parseFloat(change),
+                    changePercent: parseFloat(changePercent),
+                    eps: 'N/A',
+                    pe: 'N/A',
+                    history: history
+                };
+            }
+        }
+
+        throw new Error('無法取得股價資料');
     } catch (e) {
+        console.error('Price fetch error:', e);
         return null;
     }
 }
@@ -275,31 +309,36 @@ async function fetchStockPrice(stockCode) {
 // 取得股票分析資訊
 async function fetchStockAnalysis(stockCode) {
     try {
-        // 從大摩等研究機構取得分析
-        // 實際應用需要整合真實資料來源
-        
+        // 使用 Finmind 台灣股票月營收或財務資訊
+        const response = await Promise.race([
+            fetch(`https://api.finmindtrade.com/api/v3/data?dataset=TaiwanStockMonthRevenue&data_id=${stockCode}&limit=1`),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 5000))
+        ]);
+
+        let analyst = '正在查詢法人資訊...';
+        let futureEps = 'N/A';
+        let futurePe = 'N/A';
+
+        if (response && response.ok) {
+            const data = await response.json();
+            if (data.data && data.data.length > 0) {
+                analyst = '法人資訊來自市場公開資料。建議參考 TradingView 或 Yahoo Finance 查看最新研究報告';
+            }
+        }
+
         return {
-            futureEps: `${(Math.random() * 100 + 10).toFixed(2)} ~ ${(Math.random() * 100 + 50).toFixed(2)}`,
-            futurePe: `${(Math.random() * 40 + 10).toFixed(1)}x ~ ${(Math.random() * 40 + 25).toFixed(1)}x`,
-            analyst: '法人評論正在更新中...<br>建議訪問 TradingView 或 Yahoo Finance 查看最新分析'
+            futureEps: futureEps,
+            futurePe: futurePe,
+            analyst: analyst
         };
     } catch (e) {
+        console.error('Analysis fetch error:', e);
         return {
             futureEps: 'N/A',
             futurePe: 'N/A',
-            analyst: '暫無分析資料'
+            analyst: '法人分析資訊查詢中...'
         };
     }
-}
-
-// 生成模擬的6日股價走勢
-function generatePriceHistory() {
-    const basePrice = Math.random() * 1000 + 10;
-    const history = [];
-    for (let i = 0; i < 6; i++) {
-        history.push(basePrice + (Math.random() * 100 - 50));
-    }
-    return history;
 }
 
 async function searchStock() {
@@ -323,7 +362,7 @@ async function searchStock() {
         const changeClass = data.change >= 0 ? 'positive' : 'negative';
         const changeSymbol = data.change >= 0 ? '▲' : '▼';
         document.getElementById('priceChange').innerHTML = 
-            `<span class="${changeClass}">${changeSymbol} ${data.change} (${data.changePercent}%)</span>`;
+            `<span class="${changeClass}">${changeSymbol} ${Math.abs(data.change).toFixed(2)} (${data.changePercent}%)</span>`;
         
         document.getElementById('industry').textContent = data.industry;
         document.getElementById('position').textContent = data.position;
